@@ -1,0 +1,5 @@
+# gateway-service/requirements.txt
+fastapi
+uvicorn[standard]
+httpx
+pydantic
