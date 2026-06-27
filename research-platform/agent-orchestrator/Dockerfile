@@ -1,4 +1,4 @@
-# gateway-service/Dockerfile
+# agent-orchestrator/Dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app

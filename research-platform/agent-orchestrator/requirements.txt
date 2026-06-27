@@ -3,3 +3,12 @@ fastapi
 uvicorn[standard]
 httpx
 pydantic
+langgraph>=0.0.60
+langchain-core>=0.1.30
+langchain-groq>=0.1.0
+sentence-transformers>=2.2.0
+tavily-python>=0.3.0
+psycopg2-binary>=2.9.0
+pgvector>=0.2.0
+sqlalchemy>=2.0.0
+python-dotenv>=1.0.0
