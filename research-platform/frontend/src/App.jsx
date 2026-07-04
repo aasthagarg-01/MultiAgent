@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import "./App.css";
+
+const STORAGE_KEY = "research_chat_history";
+const MAX_SESSIONS = 20;
 
 const getMessageId = () => {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -24,13 +28,76 @@ const formatStatusContent = (status, report) => {
   return `${status}...`;
 };
 
+const createSession = (messages = [], title = "New chat") => ({
+  id: getMessageId(),
+  title,
+  timestamp: new Date().toISOString(),
+  messages,
+});
+
+const sortSessions = (sessionList) =>
+  [...sessionList].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+  );
+
+const formatTimestamp = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+};
+
 export default function App() {
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [eventSource, setEventSource] = useState(null);
+  const [sessions, setSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const messagesEndRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      const storedValue = localStorage.getItem(STORAGE_KEY);
+      if (storedValue) {
+        const parsed = JSON.parse(storedValue);
+        if (Array.isArray(parsed) && parsed.length) {
+          const normalized = sortSessions(
+            parsed
+              .filter((session) => session && typeof session === "object")
+              .map((session) => ({
+                ...session,
+                title: session.title || "New chat",
+                messages: session.messages || [],
+              })),
+          ).slice(0, MAX_SESSIONS);
+
+          if (normalized.length) {
+            setSessions(normalized);
+            setActiveSessionId(normalized[0].id);
+            setMessages(normalized[0].messages || []);
+            return;
+          }
+        }
+      }
+    } catch {
+      // Fall back to a fresh session when storage data is invalid.
+    }
+
+    const initialSession = createSession([], "New chat");
+    setSessions([initialSession]);
+    setActiveSessionId(initialSession.id);
+    setMessages([]);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -44,8 +111,69 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!sessions.length) {
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+
+    const normalized = sortSessions(sessions)
+      .slice(0, MAX_SESSIONS)
+      .map((session) => ({
+        ...session,
+        messages: session.messages || [],
+      }));
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+  }, [sessions]);
+
   const appendMessage = (message) => {
-    setMessages((prev) => [...prev, message]);
+    setMessages((prev) => {
+      const nextMessages = [...prev, message];
+      setSessions((currentSessions) =>
+        sortSessions(
+          currentSessions.map((session) =>
+            session.id === activeSessionId
+              ? { ...session, messages: nextMessages }
+              : session,
+          ),
+        ),
+      );
+      return nextMessages;
+    });
+  };
+
+  const createFreshSession = () => {
+    const freshSession = createSession([], "New chat");
+    setSessions((prev) => sortSessions([freshSession, ...prev]));
+    setActiveSessionId(freshSession.id);
+    setMessages([]);
+    setError("");
+    setLoading(false);
+    setQuery("");
+
+    if (eventSource) {
+      eventSource.close();
+      setEventSource(null);
+    }
+  };
+
+  const selectSession = (sessionId) => {
+    const selectedSession = sessions.find((session) => session.id === sessionId);
+    if (!selectedSession) {
+      return;
+    }
+
+    setActiveSessionId(sessionId);
+    setMessages(selectedSession.messages || []);
+    setError("");
+    setLoading(false);
+    setQuery("");
+
+    if (eventSource) {
+      eventSource.close();
+      setEventSource(null);
+    }
   };
 
   async function submitQuery() {
@@ -55,10 +183,11 @@ export default function App() {
 
     setError("");
 
+    const trimmedQuery = query.trim();
     const userMessage = {
       id: getMessageId(),
       role: "user",
-      content: query.trim(),
+      content: trimmedQuery,
     };
 
     const assistantId = getMessageId();
@@ -69,8 +198,22 @@ export default function App() {
       status: "running",
     };
 
-    appendMessage(userMessage);
-    appendMessage(assistantMessage);
+    const nextMessages = [...messages, userMessage, assistantMessage];
+    setMessages(nextMessages);
+    setSessions((currentSessions) =>
+      sortSessions(
+        currentSessions.map((session) =>
+          session.id === activeSessionId
+            ? {
+                ...session,
+                title: trimmedQuery.slice(0, 40),
+                timestamp: new Date().toISOString(),
+                messages: nextMessages,
+              }
+            : session,
+        ),
+      ),
+    );
     setLoading(true);
     setQuery("");
 
@@ -121,13 +264,25 @@ export default function App() {
             ? "failed"
             : "running";
 
-      setMessages((prev) =>
-        prev.map((message) =>
+      setMessages((prev) => {
+        const updatedMessages = prev.map((message) =>
           message.id === assistantId
             ? { ...message, content: newContent, status: newStatus }
             : message,
-        ),
-      );
+        );
+
+        setSessions((currentSessions) =>
+          sortSessions(
+            currentSessions.map((session) =>
+              session.id === activeSessionId
+                ? { ...session, messages: updatedMessages }
+                : session,
+            ),
+          ),
+        );
+
+        return updatedMessages;
+      });
 
       if (data.status === "FAILED") {
         setError(data.report || "Research failed.");
@@ -165,98 +320,69 @@ export default function App() {
   };
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        background: "#0f172a",
-        color: "#e2e8f0",
-        padding: "20px",
-      }}
-    >
-      <style>{`
-        @keyframes blink {
-          0%, 100% { opacity: 0.2; }
-          50% { opacity: 1; }
-        }
-      `}</style>
+    <div className={`app-shell ${isSidebarOpen ? "" : "sidebar-collapsed"}`}>
+      <div className="chat-sidebar">
+        <button className="sidebar-new-chat" onClick={createFreshSession}>
+          + New Chat
+        </button>
 
-      <div
-        style={{
-          maxWidth: 900,
-          width: "100%",
-          margin: "0 auto",
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <header style={{ marginBottom: 24 }}>
-          <h1 style={{ margin: 0, fontSize: 32 }}>🔍 Research Platform</h1>
-          <p style={{ marginTop: 8, color: "#94a3b8" }}>
-            Ask questions and get live research reports in chat form.
-          </p>
+        <div className="sidebar-session-list">
+          {sessions.map((session) => {
+            const isActive = session.id === activeSessionId;
+            return (
+              <button
+                key={session.id}
+                className={`sidebar-session-button ${isActive ? "active" : ""}`}
+                onClick={() => selectSession(session.id)}
+              >
+                <div className="session-title">{session.title}</div>
+                <div className="session-meta">
+                  {formatTimestamp(session.timestamp)}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="main-panel">
+        <header className="main-panel-header">
+          <div>
+            <button
+              className="sidebar-toggle"
+              onClick={() => setIsSidebarOpen((prev) => !prev)}
+              aria-label="Toggle sidebar"
+            >
+              ☰
+            </button>
+            <h1>🔍 Research Platform</h1>
+            <p>
+              Ask questions and get live research reports in chat form.
+            </p>
+          </div>
         </header>
 
-        <div
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: "16px 0",
-            display: "flex",
-            flexDirection: "column",
-            gap: 12,
-          }}
-        >
+        <div className="chat-messages">
           {messages.map((message) => {
             const isUser = message.role === "user";
             const isAssistant = message.role === "assistant";
             return (
               <div
                 key={message.id}
-                style={{
-                  display: "flex",
-                  justifyContent: isUser ? "flex-end" : "flex-start",
-                }}
+                className={`chat-message-row ${isUser ? "user" : "assistant"}`}
               >
-                <div
-                  style={{
-                    maxWidth: "78%",
-                    width: "100%",
-                    background: isUser ? "#2563eb" : "#1e293b",
-                    color: isUser ? "#fff" : "#e2e8f0",
-                    borderRadius: 20,
-                    padding: "16px 18px",
-                    boxShadow: "0 16px 32px rgba(15, 23, 42, 0.08)",
-                    position: "relative",
-                  }}
-                >
+                <div className={`chat-bubble ${isUser ? "user" : "assistant"}`}>
                   {isAssistant && message.status === "running" ? (
-                    <div
-                      style={{ display: "flex", alignItems: "center", gap: 10 }}
-                    >
+                    <div className="assistant-running">
                       <span>{message.content}</span>
-                      <span
-                        style={{
-                          display: "inline-block",
-                          width: 18,
-                          textAlign: "left",
-                        }}
-                      >
-                        <span style={{ animation: "blink 1s infinite" }}>
-                          •
-                        </span>
-                        <span style={{ animation: "blink 1s infinite 0.2s" }}>
-                          •
-                        </span>
-                        <span style={{ animation: "blink 1s infinite 0.4s" }}>
-                          •
-                        </span>
+                      <span className="typing-dots" aria-hidden="true">
+                        <span>•</span>
+                        <span>•</span>
+                        <span>•</span>
                       </span>
                     </div>
                   ) : message.status === "failed" ? (
-                    <div style={{ color: "#fecaca" }}>{message.content}</div>
+                    <div className="assistant-error">{message.content}</div>
                   ) : isAssistant ? (
                     <ReactMarkdown>{message.content}</ReactMarkdown>
                   ) : (
@@ -269,18 +395,8 @@ export default function App() {
           <div ref={messagesEndRef} />
         </div>
 
-        <div
-          style={{
-            marginTop: "auto",
-            padding: "16px",
-            background: "#020617",
-            borderRadius: 24,
-            boxShadow: "0 -10px 30px rgba(15, 23, 42, 0.25)",
-          }}
-        >
-          {error && (
-            <div style={{ marginBottom: 12, color: "#fecaca" }}>{error}</div>
-          )}
+        <div className="composer-card">
+          {error && <div className="composer-error">{error}</div>}
 
           <textarea
             value={query}
@@ -289,42 +405,14 @@ export default function App() {
             placeholder="Type your question..."
             rows={1}
             disabled={loading}
-            style={{
-              width: "100%",
-              resize: "none",
-              minHeight: 56,
-              maxHeight: 180,
-              padding: 14,
-              borderRadius: 18,
-              border: "1px solid #334155",
-              background: "#0f172a",
-              color: "#e2e8f0",
-              fontSize: 16,
-              outline: "none",
-              lineHeight: 1.6,
-            }}
+            className="composer-input"
           />
 
-          <div
-            style={{
-              marginTop: 12,
-              display: "flex",
-              justifyContent: "flex-end",
-            }}
-          >
+          <div className="composer-actions">
             <button
               onClick={submitQuery}
               disabled={loading || !query.trim()}
-              style={{
-                padding: "12px 22px",
-                borderRadius: 14,
-                border: "none",
-                background: loading ? "#475569" : "#2563eb",
-                color: "#fff",
-                cursor: loading ? "not-allowed" : "pointer",
-                fontSize: 16,
-                fontWeight: 600,
-              }}
+              className={`composer-button ${loading ? "loading" : ""}`}
             >
               {loading ? "Researching…" : "Run Research"}
             </button>
